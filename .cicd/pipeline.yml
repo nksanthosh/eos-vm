@@ -57,18 +57,16 @@ steps:
 
   - label: ":darwin: macOS 10.14 - Build & Test"
     command: |
-      (
-      brew install git cmake boost
-      git clone $BUILDKITE_REPO eos-vm
-      cd eos-vm
-      git submodule update --init --recursive
-      source ./.cicd/execute.sh
-      mkdir build
-      cd build
-      execute pwd
-      execute cmake ..
-      execute make -j $(nproc)
-      )
+      brew install git cmake boost && \
+      git clone $BUILDKITE_REPO eos-vm && \
+      cd eos-vm && \
+      git submodule update --init --recursive && \
+      source ./.cicd/execute.sh && \
+      mkdir build && \
+      cd build && \
+      execute pwd && \
+      execute cmake .. && \
+      execute make -j $(nproc) && \
     plugins:
       - chef/anka#v0.5.1:
           no-volume: true
