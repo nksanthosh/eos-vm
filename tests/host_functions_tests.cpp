@@ -152,8 +152,8 @@ struct init_backend {
    }
    template<typename T>
    void add(const std::string& name) {
-      rhf_t::template add<Transform, &Functions::template put<T>, wasm_allocator>("env", "put_" + name);
-      rhf_t::template add<Transform, &Functions::template get<T>, wasm_allocator>("env", "get_" + name);
+      add_with_adjustment<&Functions::template put<T>>(rhf_t{}, "env", "put_" + name);
+      add_with_adjustment<&Functions::template get<T>>(rhf_t{}, "env", "get_" + name);
    }
    // forwarding functions
    template<typename... A>
@@ -327,11 +327,11 @@ TEST_CASE( "Test C-style host function system", "[C-style_host_functions_tests]"
    wasm_allocator wa;
    using backend_t = eosio::vm::backend<nullptr_t>;
    using rhf_t     = eosio::vm::registered_host_functions<nullptr_t>;
-   rhf_t::add<nullptr_t, &c_style_host_function_0, wasm_allocator>("env", "c_style_host_function_0");
-   rhf_t::add<nullptr_t, &c_style_host_function_1, wasm_allocator>("env", "c_style_host_function_1");
-   rhf_t::add<nullptr_t, &c_style_host_function_2, wasm_allocator>("env", "c_style_host_function_2");
-   rhf_t::add<nullptr_t, &c_style_host_function_3, wasm_allocator>("env", "c_style_host_function_3");
-   rhf_t::add<nullptr_t, &c_style_host_function_4, wasm_allocator>("env", "c_style_host_function_4");
+   rhf_t::add<&c_style_host_function_0>("env", "c_style_host_function_0");
+   rhf_t::add<&c_style_host_function_1>("env", "c_style_host_function_1");
+   rhf_t::add<&c_style_host_function_2>("env", "c_style_host_function_2");
+   rhf_t::add<&c_style_host_function_3>("env", "c_style_host_function_3");
+   rhf_t::add<&c_style_host_function_4>("env", "c_style_host_function_4");
 
    backend_t bkend(host_functions_test_0_wasm);
    bkend.set_wasm_allocator(&wa);

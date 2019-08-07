@@ -16,12 +16,14 @@
 
 namespace eosio { namespace vm {
 
+   struct wasm_allocator;
+
    template <typename Derived, typename Base>
    struct construct_derived {
       static auto value(Base& base) { return Derived(base); }
    };
 
-   // Workaround for compiler bug handling C++g17 auto template parameters.
+   // Workaround for compiler bug handling C++17 auto template parameters.
    // The parameter is not treated as being type-dependent in all contexts,
    // causing early evaluation of the containing expression.
    // Tested at Apple LLVM version 10.0.1 (clang-1001.0.46.4)
@@ -29,26 +31,14 @@ namespace eosio { namespace vm {
    inline constexpr U&& make_dependent(U&& u) { return static_cast<U&&>(u); }
 #define AUTO_PARAM_WORKAROUND(X) make_dependent<decltype(X)>(X)
 
-   template <typename... Args, size_t... Is>
-   auto get_args_full(std::index_sequence<Is...>) {
-      std::tuple<std::decay_t<Args>...> tup;
-      return std::tuple<Args...>{ std::get<Is>(tup)... };
-   }
-
    template <typename R, typename... Args>
-   auto get_args_full(R(Args...)) {
-      return get_args_full<Args...>(std::index_sequence_for<Args...>{});
-   }
+   auto get_args_full(R(Args...)) -> std::tuple<Args...>;
 
    template <typename R, typename Cls, typename... Args>
-   auto get_args_full(R (Cls::*)(Args...)) {
-      return get_args_full<Args...>(std::index_sequence_for<Args...>{});
-   }
+   auto get_args_full(R (Cls::*)(Args...)) -> std::tuple<Cls*, Args...>;
 
    template <typename R, typename Cls, typename... Args>
-   auto get_args_full(R (Cls::*)(Args...) const) {
-      return get_args_full<Args...>(std::index_sequence_for<Args...>{});
-   }
+   auto get_args_full(R (Cls::*)(Args...) const) -> std::tuple<const Cls*, Args...>;
 
    template <typename T>
    struct return_type_wrapper {
@@ -228,32 +218,68 @@ namespace eosio { namespace vm {
       return ptr.get();
    }
 
-   template <typename WAlloc, typename Cls, typename Cls2, auto F, typename R, typename Args, size_t... Is>
+   template<typename R, typename... Args>
+   constexpr auto get_sig(R(*)(Args...)) -> R(*)(Args...) { return nullptr; }
+   template<typename R, typename Cls, typename... Args>
+   constexpr auto get_sig(R(Cls::*)(Args...)) -> R(*)(Cls*, Args...) { return nullptr; }
+   template<typename R, typename Cls, typename... Args>
+   constexpr auto get_sig(R(Cls::*)(Args...) const) -> R(*)(const Cls*, Args...) { return nullptr; }
+
+   template <typename Cls, typename Cls2, auto F, typename R, typename... A>
+   constexpr auto adjust_context_func(Cls* cls, A... a) -> R {
+      return std::invoke(F, construct_derived<Cls2, Cls>::value(*cls), static_cast<A&&>(a)...);
+   }
+
+   template <typename Cls, auto F, typename Cls2, typename R, typename... A>
+   constexpr auto adjust_context_impl(R(*)(Cls2*, A...)) {
+      return &adjust_context_func<Cls, Cls2, F, R, A...>;
+   }
+
+   template<typename Cls, auto F>
+   constexpr auto adjust_context() {
+      constexpr auto sig = get_sig(AUTO_PARAM_WORKAROUND(F));
+      return adjust_context_impl<Cls, F>(sig);
+   }
+
+   template <typename Cls, auto F, typename R, typename... A>
+   constexpr auto discard_context_func(Cls* cls, A... a) -> R {
+      return std::invoke(F, static_cast<A&&>(a)...);
+   }
+
+   template <typename Cls, auto F, typename R, typename... A>
+   constexpr auto discard_context_impl(R(*)(A...)) {
+      return &discard_context_func<Cls, F, R, A...>;
+   }
+
+   template<typename Cls, auto F>
+   constexpr auto discard_context() {
+      constexpr auto sig = get_sig(AUTO_PARAM_WORKAROUND(F));
+      return discard_context_impl<Cls, F>(sig);
+   }
+
+   template<typename Cls, typename Cls2, auto F>
+   constexpr auto adjust_or_discard_context() {
+      if constexpr (std::is_same_v<Cls2, nullptr_t>) {
+         return discard_context<Cls, F>();
+      } else {
+         return adjust_context<Cls, F>();
+      }
+   }
+
+   template <typename WAlloc, typename Cls, auto F, typename R, typename Args, size_t... Is>
    auto create_function(std::index_sequence<Is...>) {
       return std::function<void(Cls*, WAlloc*, operand_stack&)>{ [](Cls* self, WAlloc* walloc, operand_stack& os) {
          size_t i = sizeof...(Is) - 1;
          if constexpr (!std::is_same_v<R, void>) {
-            if constexpr (std::is_same_v<Cls2, std::nullptr_t>) {
-               R res = std::invoke(F, detail::get_value<typename std::tuple_element<Is, Args>::type>(
-                                            walloc, std::move(os.get_back(i - Is)))...);
-               os.trim(sizeof...(Is));
-               os.push(detail::resolve_result(static_cast<R&&>(res), walloc));
-            } else {
-               R res = std::invoke(F, construct_derived<Cls2, Cls>::value(*self),
-                                   detail::get_value<typename std::tuple_element<Is, Args>::type>(
-                                         walloc, std::move(os.get_back(i - Is)))...);
-               os.trim(sizeof...(Is));
-               os.push(detail::resolve_result(static_cast<R&&>(res), walloc));
-            }
+            R res = std::invoke(F, self,
+                                detail::get_value<std::tuple_element_t<Is, Args>>(
+                                      walloc, std::move(os.get_back(i - Is)))...);
+            os.trim(sizeof...(Is));
+            os.push(detail::resolve_result(static_cast<R&&>(res), walloc));
          } else {
-            if constexpr (std::is_same_v<Cls2, std::nullptr_t>) {
-               std::invoke(F, detail::get_value<typename std::tuple_element<Is, Args>::type>(
-                                    walloc, std::move(os.get_back(i - Is)))...);
-            } else {
-               std::invoke(F, construct_derived<Cls2, Cls>::value(*self),
-                           detail::get_value<typename std::tuple_element<Is, Args>::type>(
-                                 walloc, std::move(os.get_back(i - Is)))...);
-            }
+            std::invoke(F, self,
+                        detail::get_value<std::tuple_element_t<Is, Args>>(
+                              walloc, std::move(os.get_back(i - Is)))...);
             os.trim(sizeof...(Is));
          }
       } };
@@ -318,19 +344,6 @@ namespace eosio { namespace vm {
       }
    };
 
-#if defined __clang__
-#   pragma clang diagnostic push
-#   pragma clang diagnostic ignored "-Wgnu-string-literal-operator-template"
-#endif
-   template <typename T, T... Str>
-   static constexpr host_function_name<Str...> operator""_hfn() {
-      constexpr auto hfn = host_function_name<Str...>{};
-      return hfn;
-   }
-#if defined __clang__
-#   pragma clang diagnostic pop
-#endif
-
    template <typename C, auto C::*MP, typename Name>
    struct registered_member_function {
       static constexpr auto function  = MP;
@@ -346,6 +359,36 @@ namespace eosio { namespace vm {
          return std::hash<T>()(p.first) ^ std::hash<U>()(p.second);
       }
    };
+
+   // If the first argument is a variant of Cls*
+   template<class Tuple, class Cls>
+   struct has_class_param;
+   template<typename Cls>
+   struct has_class_param<std::tuple<>, Cls> {
+      static constexpr bool value = false;
+      using popped = void;
+   };
+   template<typename A0, typename... A, typename Cls>
+   struct has_class_param<std::tuple<A0, A...>, Cls> {
+      static constexpr bool value = std::is_same_v<std::decay_t<std::remove_pointer_t<A0>>, Cls>;
+      using popped = std::tuple<A...>;
+   };
+
+   template<typename Cls, typename Arg0, typename FuncType>
+   decltype(auto) convert_host(Cls* self) {
+      if constexpr ( std::is_pointer_v<ArgType> )
+         if constexpr ( std::is_convertible_v<Cls*, ArgType> )
+            return self;
+         else if constexpr ( std::is_member_pointer_v<FuncType> )
+            if constexpr ( std::is_convertible_v<Cls&, std::decay_t<std::remove_pointer_t<ArgType>>> )
+               return std::decay_t<std::remove_pointer_t<ArgType>>(*self);
+            else
+               return;
+         else
+            return;
+      else if constexpr ( std::is_convertible_v<Cls&, ArgType> )
+         return (*self);
+   }
 
    template <typename Cls>
    struct registered_host_functions {
@@ -363,15 +406,20 @@ namespace eosio { namespace vm {
          return _mappings;
       }
 
-      template <typename Cls2, auto Func, typename WAlloc>
+      template <auto Func, typename WAlloc=wasm_allocator>
       static void add(const std::string& mod, const std::string& name) {
          using deduced_full_ts                         = decltype(get_args_full(AUTO_PARAM_WORKAROUND(Func)));
-         using deduced_ts                              = decltype(get_args(AUTO_PARAM_WORKAROUND(Func)));
          using res_t                                   = typename decltype(get_return_t(AUTO_PARAM_WORKAROUND(Func)))::type;
-         static constexpr auto is                      = std::make_index_sequence<std::tuple_size<deduced_ts>::value>();
          auto&                 current_mappings        = get_mappings<WAlloc>();
          current_mappings.named_mapping[{ mod, name }] = current_mappings.current_index++;
-         current_mappings.functions.push_back(create_function<WAlloc, Cls, Cls2, Func, res_t, deduced_full_ts>(is));
+         static constexpr bool has_object              = has_class_param<deduced_full_ts, Cls>::value;
+         static constexpr auto is                      = std::make_index_sequence<std::tuple_size_v<deduced_full_ts> - has_object>();
+         if constexpr (has_object) {
+            using deduced_ts = typename has_class_param<deduced_full_ts, Cls>::popped;
+            current_mappings.functions.push_back(create_function<WAlloc, Cls, Func, res_t, deduced_ts>(is));
+         } else {
+            current_mappings.functions.push_back(create_function<WAlloc, Cls, discard_context<Cls, Func>(), res_t, deduced_full_ts>(is));
+         }
       }
 
       template <typename Module>
@@ -396,10 +444,27 @@ namespace eosio { namespace vm {
       }
    };
 
+
+   // registered_host_functions rhf;
+   // rhf.add<&test_func>("env", "test_func");
+   // add_with_adjustment<&test_func>(rhf, "env", "test_func");
+
+   std::nullptr_t get_class(...);
+   template<typename R, typename Cls, typename... A>
+   Cls& get_class(R (Cls::*)(A...));
+   template<typename R, typename Cls, typename... A>
+   Cls& get_class(R (Cls::*)(A...) const);
+
+   template<auto F, typename Cls>
+   void add_with_adjustment(const registered_host_functions<Cls>& rhf, const std::string& mod, const std::string& name) {
+      using Cls2 = std::decay_t<decltype(get_class(AUTO_PARAM_WORKAROUND(F)))>;
+      registered_host_functions<Cls>::template add<adjust_or_discard_context<Cls, Cls2, F>()>(mod, name);
+   }
+
    template <typename Cls, typename Cls2, auto F>
    struct registered_function {
       registered_function(std::string mod, std::string name) {
-         registered_host_functions<Cls>::template add<Cls2, F, wasm_allocator>(mod, name);
+         add_with_adjustment<F>(registered_host_functions<Cls>(), mod, name);
       }
    };
 
