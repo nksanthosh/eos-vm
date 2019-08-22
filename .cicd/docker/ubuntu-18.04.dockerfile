@@ -25,3 +25,4 @@ RUN git clone --single-branch --branch release_80 https://git.llvm.org/git/llvm.
     make -j $(nproc) && \
     make install && \
     rm -rf /clang8
+ENV TEST=123
